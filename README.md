@@ -74,10 +74,10 @@ Note that **global** makes no sense without a defined **docroot**.
 
 **modules**: turns on the module loader. It has one attribute, **path**, that specifies where to look to .so libraries that are used as onion handlers.
 
-**module**: has two, required, attributes, similar to scripts: **url**, the reqular expression to match, and **name**, the name of the .so library relative to the **path** supplied by the &lt;moduless&gt; tag.
+**module**: has two, required, attributes, similar to scripts: **url**, the reqular expression to match, and **name**, the name of the .so library relative to the **path** supplied by the &lt;modules&gt; tag.
 
 For the **ssl** block, the following tags need to be present:<br>
-**port**: must be different than the port the server is already configured for.<br>
+**port**: must be different from the port the server is already configured for.<br>
 **cert**: path to the PEM formatted file containing the servers certificate.<br>
 **key**: path to the PEM formatted file containing the servers key<br>
 If **cacerts** is present, it is the path to the PEM formatted file containing the intermediary certificates.
@@ -99,15 +99,15 @@ cgi.isSecure();
 cgi.setResponseCode(code);
 
 /*
- * sets a HTTP header. 
- * If key is provided, but not value, remove key.
+ * sets a HTTP response heeader. 
+ * If key is provided, but not value, remove header identified by key.
  */
 cgi.setHeader(key,value);
 
 // returns a string indicating the HTTP method used by the request.
 cgi.getMethod();
 
-// returns the value of the HTTP header named by key, or undefined if it does not exist.
+// returns the value of the HTTP request header named by key, or undefined if it does not exist.
 cgi.getHeader(key);
 
 // returns a string containing the relative path of the request.
@@ -122,7 +122,10 @@ cgi.getQuery(key);
 // returns the value of the POST variable named by key, or undefined if it does not exist.
 cgi.getPost(key);
 
-// call fn for every value of key that exists in the POST variable named by key
+/*
+ * call fn for every value of key that exists in the POST variable named by key
+ * useful for POSTed form elements, for example checkboxes
+ */
 cgi.getPostMulti(key,fn);
 
 /*
