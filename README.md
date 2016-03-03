@@ -13,7 +13,7 @@
 ## About
 **Cepa** is a threaded web server with server-side javascript, RESTful urls, and loadable handlers.<br>
 Cepa derives it's functionality from two main sources: [Onion](http://coralbits.com/libonion/), and [Duktape](http://duktape.org/).<br>
-A simple XML file configures the server, mapping URLs to scripts or handler modules that you write.
+A simple XML file configures the server, mapping URLs to scripts or handler modules that you write.<br>
 The idea was born out of the need for a lightweight application server for constrained VPSs.
 
 
