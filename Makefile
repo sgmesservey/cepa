@@ -21,7 +21,7 @@ sqlite3.o: dependencies/sqlite-amalgamation-3110000/sqlite3.c
 
 .PHONY: example
 example: example/cepa/dependencies/baz.c
-	$(CC) -shared -o example/cepa/dependencies/baz.so $^
+	$(CC) -shared -fPIC -o example/cepa/dependencies/baz.so $^
 	$(MAKE) -C dependencies/duklib
 	cp dependencies/duklib/*.so example/cepa/lib
 
