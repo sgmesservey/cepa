@@ -139,9 +139,11 @@ If configured, **Cepa** can also load scripts and native code libraries from a s
 This facility is provided by the global function `require`.<br>
 A native code library needs to export a single function with the following signature:
 ```C
-int init(duk_context *duk);
+duk_int_t init(duk_context *duk);
 ```
-The function must return zero to indicate a successful initialization.<br>
+The function is called with two arguments: *exports* and *module*, in that order.<br>
+You can either decorate *exports* with functions and properties,<br>
+or set the *exports* property of *module* to directly return a function.
 
 
 ## Modules
