@@ -182,6 +182,6 @@ FAIL:
 
 int init(duk_context *duk) {
 	duk_push_c_function(duk,sqliteObject,1);
-	duk_put_global_string(duk,"Sqlite");
+	duk_put_prop_string(duk,-1,"Sqlite");
 	return 0;
 }

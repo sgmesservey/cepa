@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <dlfcn.h>
 #include <onion/onion.h>
 #include <onion/handler.h>
@@ -55,7 +56,7 @@ static char *JSLIBPATH = NULL;
 static onion_connection_status index_handler(void *data, onion_request *request, onion_response *response);
 static onion_connection_status js_handler(void *data, onion_request *request, onion_response *response);
 
-static duk_int_t duk_require(duk_context *duk);
+static duk_int_t duk_modsearch(duk_context *duk);
 static duk_int_t duk_print(duk_context *duk);
 static duk_int_t duk_is_secure(duk_context *duk);
 static duk_int_t duk_set_code(duk_context *duk);
@@ -300,7 +301,8 @@ static onion_connection_status js_handler(void *data, onion_request *request, on
 	header *h,*ht;
 	int len;
 	jslib *j,*jt;
-	
+	sds errfull = NULL;
+
 	if (*spath == '!') {
 		snprintf(path,CEPA_PATH_MAX - 1,"%s",&spath[1]);
 	} else {
@@ -334,12 +336,31 @@ static onion_connection_status js_handler(void *data, onion_request *request, on
 	duk_push_global_object(duk);
 	duk_del_prop_string(duk,-1,"print");
 	duk_del_prop_string(duk,-1,"alert");
-	duk_push_c_function(duk,duk_require,1);
-	duk_put_prop_string(duk,-2,"require");
-	duk_pop(duk);
+	duk_get_prop_string(duk,-1,"Duktape");
+	duk_push_c_function(duk,duk_modsearch,4);
+	duk_put_prop_string(duk,-2,"modSearch");
+	duk_pop_2(duk);
+
 
 	if (duk_peval_file(duk,path) != 0) {
-		msg = duk_safe_to_string(duk,-1);
+		//msg = duk_safe_to_string(duk,-1);
+		errfull = sdsempty();
+		if (duk_is_object(duk,-1)) {
+			duk_get_prop_string(duk,-1,"fileName");
+			errfull = sdscat(errfull,duk_safe_to_string(duk,-1));
+			duk_pop(duk);
+			errfull = sdscat(errfull," : ");
+			duk_get_prop_string(duk,-1,"lineNumber");
+			errfull = sdscat(errfull,duk_safe_to_string(duk,-1));
+			duk_pop(duk);
+			errfull = sdscat(errfull," : ");
+			duk_get_prop_string(duk,-1,"message");
+			errfull = sdscat(errfull,duk_safe_to_string(duk,-1));
+			duk_pop(duk);
+			msg = errfull;
+		} else {
+			msg = duk_safe_to_string(duk,-1);
+		}
 		goto FAIL;
 	}
 
@@ -380,17 +401,18 @@ FAIL:
 	sdsfree(ctx.buffer);
 	onion_shortcut_response(msg,500,request,response);
 	if (duk != NULL) duk_destroy_heap(duk);
+	if (errfull != NULL) sdsfree(errfull);
 	return OCS_PROCESSED;
 }
 
-static duk_int_t duk_require(duk_context *duk) {
+static duk_int_t duk_modsearch(duk_context *duk) {
 	context *ctx;
 	const char *name;
-	char path[CEPA_PATH_MAX],*ext;
-	void *handle;
-	int (*init)(duk_context *duk);
+	char path[CEPA_PATH_MAX];
+	struct stat astat;
+	void *handle = NULL;
+	duk_int_t (*init)(duk_context *duk);
 	jslib *lib;
-	sds errmsg;
 
 	duk_push_heap_stash(duk);
 	duk_get_prop_string(duk,-1,"__CTX");
@@ -401,56 +423,54 @@ static duk_int_t duk_require(duk_context *duk) {
 		duk_push_string(duk,"no library path");
 		duk_throw(duk);
 	}
-
 	name = duk_require_string(duk,0);
-	if ((ext = strrchr(name,'.')) == NULL) {
-		duk_push_string(duk,"missing library extension");
-		duk_throw(duk);
-	}
-	ext++;
-	if (*ext == '\0' || (strcmp(ext,"js") && strcmp(ext,"so"))) {
-		duk_push_string(duk,"invalid library extension");
-		duk_throw(duk);
-	}
 	HASH_FIND(hh,ctx->jslibs,name,strlen(name),lib);
 	if (lib != NULL) return 0;
-	snprintf(path,CEPA_PATH_MAX - 1,"%s/%s",JSLIBPATH,name);
-	if (strcmp(ext,"js") == 0) {
-		if (duk_peval_file(duk,path) == 0) duk_pop(duk);
-		else duk_throw(duk);
-	} else {
+	if ((lib = malloc(sizeof(jslib))) == NULL) {
+		duk_push_string(duk,"out of memory");
+		duk_throw(duk);
+	}
+	if ((lib->name = strdup(name)) == NULL) {
+		free(lib);
+		duk_push_string(duk,"out of memory");
+		duk_throw(duk);
+	}
+	lib->handle = NULL;
+	snprintf(path,CEPA_PATH_MAX - 1,"%s/%s.js",JSLIBPATH,name);
+	path[CEPA_PATH_MAX - 1] = '\0';
+	if (stat(path,&astat) == -1) {
+		snprintf(path,CEPA_PATH_MAX - 1,"%s/%s.so",JSLIBPATH,name);
+		path[CEPA_PATH_MAX - 1] = '\0';
+		if (stat(path,&astat) == -1) {
+			duk_push_sprintf(duk,"module %s not found",name);
+			goto FAIL;
+		}
 		if ((handle = dlopen(path,RTLD_NOW)) == NULL) {
-			duk_push_string(duk,dlerror());
-			duk_throw(duk);
+			duk_push_sprintf(duk,"failed to load native module %s: %s",name,dlerror());
+			goto FAIL;
 		}
 		if ((init = dlsym(handle,"init")) == NULL) {
-			duk_push_string(duk,dlerror());
-			dlclose(handle);
-			duk_throw(duk);
+			duk_push_sprintf(duk,"failed to load native module %s: %s",name,dlerror());
+			goto FAIL;
 		}
-		if (init(duk)) {
-			dlclose(handle);
-			errmsg = sdsempty();
-			errmsg = sdscatprintf(errmsg,"library %s failed to initialize",name);
-			duk_push_string(duk,errmsg);
-			sdsfree(errmsg);
-			duk_throw(duk);
+		duk_push_c_function(duk,init,2);
+		duk_dup(duk,2);
+		duk_dup(duk,3);
+		if (duk_pcall(duk,2) != 0) {
+			goto FAIL;
 		}
-		if ((lib = malloc(sizeof(jslib))) == NULL) {
-			dlclose(handle);
-			duk_push_string(duk,"out of memory");
-			duk_throw(duk);
-		}
-		if ((lib->name = strdup(name)) == NULL) {
-			dlclose(handle);
-			free(lib);
-			duk_push_string(duk,"out of memory");
-			duk_throw(duk);
-		}
+		duk_pop(duk);
 		lib->handle = handle;
-		HASH_ADD_KEYPTR(hh,ctx->jslibs,lib->name,strlen(lib->name),lib);
+	} else {
+		duk_push_string_file(duk,path);
+		return 1;
 	}
 	return 0;
+FAIL:
+	free(lib->name);
+	free(lib);
+	duk_throw(duk);
+	return 0; // compiler bodge
 }
 
 static duk_int_t duk_is_secure(duk_context *duk) {

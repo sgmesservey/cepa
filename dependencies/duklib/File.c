@@ -205,7 +205,7 @@ static int fileCopy(duk_context *duk) {
 	return 1;
 }
 
-int init(duk_context *duk) {
+duk_int_t init(duk_context *duk) {
 	duk_push_c_function(duk,fileObject,2);
 	duk_push_c_function(duk,fileSlurp,1);
 	duk_put_prop_string(duk,-2,"slurp");
@@ -213,6 +213,6 @@ int init(duk_context *duk) {
 	duk_put_prop_string(duk,-2,"rename");
 	duk_push_c_function(duk,fileCopy,2);
 	duk_put_prop_string(duk,-2,"copy");
-	duk_put_global_string(duk,"File");
+	duk_put_prop_string(duk,-2,"exports");
 	return 0;
 }
