@@ -5,6 +5,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#include <pthread.h>
+#include <time.h>
 #include <onion/onion.h>
 #include <onion/handler.h>
 #include <onion/https.h>
@@ -50,8 +52,18 @@ typedef struct {
 	int rc;
 } context;
 
+typedef struct {
+	char *key;
+	void *value;
+	timer_t timer;
+	void (*ffn)(void *);
+	UT_hash_handle hh;
+} keyvalue;
+
 static int DONE = 0;
 static char *JSLIBPATH = NULL;
+static keyvalue *kvs = NULL;
+static pthread_rwlock_t kvs_lock;
 
 static onion_connection_status index_handler(void *data, onion_request *request, onion_response *response);
 static onion_connection_status js_handler(void *data, onion_request *request, onion_response *response);
@@ -79,6 +91,9 @@ static duk_int_t duk_sqlite_bind(duk_context *duk);
 static duk_int_t duk_sqlite_execute(duk_context *duk);
 static duk_int_t duk_sqlite_finalize(duk_context *duk);
 
+static duk_int_t duk_kv_set(duk_context *duk);
+static duk_int_t duk_kv_get(duk_context *duk);
+
 static const duk_function_list_entry CGIBINDINGS[] = {
 	{ "print",           duk_print,        DUK_VARARGS },
 	{ "isSecure",        duk_is_secure,    0 },
@@ -103,6 +118,12 @@ static const duk_function_list_entry SQLITEBINDINGS[] = {
 	{ NULL,      NULL,               0 }
 };
 
+static const duk_function_list_entry KVBINDINGS[] = {
+	{ "get", duk_kv_get, 1 },
+	{ "set", duk_kv_set, 4 },
+	{ NULL,  NULL,       0 }
+};
+
 static void sig_handler(int sig) {
 	DONE = 1;
 }
@@ -114,6 +135,25 @@ static void close_modules(listelm *list) {
 		LL_DELETE(list,e);
 		dlclose(e->handle);
 		free(e);
+	}
+}
+
+static void timer_handler(int sig, siginfo_t *si, void *uc) {
+	keyvalue *kv;
+	char *key = si->si_value.sival_ptr;
+
+	pthread_rwlock_rdlock(&kvs_lock);
+	HASH_FIND(hh,kvs,key,strlen(key),kv);
+	pthread_rwlock_unlock(&kvs_lock);
+
+	if (kv) {
+		pthread_rwlock_wrlock(&kvs_lock);
+		HASH_DEL(kvs,kv);
+		pthread_rwlock_unlock(&kvs_lock);
+		free(kv->key);
+		if (kv->ffn != NULL) kv->ffn(kv->value);
+		timer_delete(kv->timer);
+		free(kv);
 	}
 }
 
@@ -130,6 +170,8 @@ int main(int argc, char **argv) {
 	int (*init)(const char *path);
 	onion_connection_status (*dynhandler)(void *,onion_request *,onion_response *);
 	listelm *modules = NULL,*elm;
+	struct sigaction sa;
+	keyvalue *kv,*kvt;
 
 	if (argc == 1) {
 		fprintf(stderr,"%s config_file\n",argv[0]);
@@ -143,6 +185,19 @@ int main(int argc, char **argv) {
 
 	if (signal(SIGINT,sig_handler) == SIG_ERR) {
 		fprintf(stderr,"failed to set handler for SIGINT\n");
+		return 1;
+	}
+
+	sa.sa_flags = SA_SIGINFO;
+	sa.sa_sigaction = timer_handler;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGRTMAX - 1,&sa,NULL) < 0) {
+		fprintf(stderr,"failed to intialize key/value store timeout mechanism\n");
+		return 1;
+	}
+
+	if (pthread_rwlock_init(&kvs_lock,NULL) < 0) {
+		fprintf(stderr,"failed to initialize key/value store read/write lock\n");
 		return 1;
 	}
 
@@ -285,6 +340,14 @@ int main(int argc, char **argv) {
 	if (ssl != NULL) onion_listen_point_free(ssl);
 	close_modules(modules);
 	if (JSLIBPATH != NULL) free(JSLIBPATH);
+	HASH_ITER(hh,kvs,kv,kvt) {
+		HASH_DEL(kvs,kv);
+		timer_delete(kv->timer);
+		free(kv->key);
+		if (kv->ffn != NULL) kv->ffn(kv->value);
+		free(kv);
+	}
+	pthread_rwlock_destroy(&kvs_lock);
 	return 0;
 }
 
@@ -333,6 +396,10 @@ static onion_connection_status js_handler(void *data, onion_request *request, on
 	duk_push_c_function(duk,duk_sqlite_factory,DUK_VARARGS);
 	duk_put_global_string(duk,"sqlite");
 
+	duk_push_object(duk);
+	duk_put_function_list(duk,-1,KVBINDINGS);
+	duk_put_global_string(duk,"kv");
+
 	duk_push_global_object(duk);
 	duk_del_prop_string(duk,-1,"print");
 	duk_del_prop_string(duk,-1,"alert");
@@ -343,7 +410,6 @@ static onion_connection_status js_handler(void *data, onion_request *request, on
 
 
 	if (duk_peval_file(duk,path) != 0) {
-		//msg = duk_safe_to_string(duk,-1);
 		errfull = sdsempty();
 		if (duk_is_object(duk,-1)) {
 			duk_get_prop_string(duk,-1,"fileName");
@@ -1045,3 +1111,125 @@ static duk_int_t duk_sqlite_finalize(duk_context *duk) {
 	return 0;
 }
 
+static duk_int_t duk_kv_get(duk_context *duk) {
+	const char *key;
+	duk_size_t len;
+	keyvalue *kv;
+
+	key = duk_require_lstring(duk,0,&len);
+	
+	pthread_rwlock_rdlock(&kvs_lock);
+	HASH_FIND(hh,kvs,key,len,kv);
+	pthread_rwlock_unlock(&kvs_lock);
+
+	if (kv != NULL) {
+		duk_push_string(duk,kv->value);
+		return 1;
+	}
+	return 0;
+}
+
+static duk_int_t duk_kv_set(duk_context *duk) {
+	const char *key,*value;
+	duk_size_t len;
+	duk_int_t expiry;
+	duk_bool_t nxflag;
+	keyvalue *kv;
+	struct sigevent sev;
+	struct itimerspec its;
+	int err;
+
+	key = duk_require_lstring(duk,0,&len);
+	value = duk_get_string(duk,1);
+	expiry = duk_get_int(duk,2);
+	nxflag = duk_get_boolean(duk,3);
+
+	pthread_rwlock_rdlock(&kvs_lock);
+	HASH_FIND(hh,kvs,key,len,kv);
+	pthread_rwlock_unlock(&kvs_lock);
+
+	if (kv == NULL) {
+		if (value == NULL) {
+			duk_push_false(duk);
+		} else {
+			if ((kv = malloc(sizeof(keyvalue))) == NULL) {
+				duk_push_string(duk,"out of memory");
+				duk_throw(duk);
+			}
+			if ((kv->key = strdup(key)) == NULL) {
+				free(kv);
+				duk_push_string(duk,"out of memory");
+				duk_throw(duk);
+			}
+			if ((kv->value = strdup(value)) == NULL) {
+				free(kv->key);
+				free(kv);
+				duk_push_string(duk,"out of memory");
+				duk_throw(duk);
+			}
+			if (expiry > 0) {
+				sev.sigev_notify = SIGEV_SIGNAL;
+				sev.sigev_signo = SIGRTMAX - 1;
+				sev.sigev_value.sival_ptr = kv->key;
+				if (timer_create(CLOCK_REALTIME,&sev,&kv->timer) == -1) {
+					err = errno;
+					free(kv->key);
+					free(kv);
+					duk_push_sprintf(duk,"failed to create timer: %s",strerror(err));
+					duk_throw(duk);
+				}
+				its.it_value.tv_sec = expiry;
+				its.it_value.tv_nsec = 0;
+				its.it_interval.tv_sec = 0;
+				its.it_interval.tv_nsec = 0;
+				if (timer_settime(kv->timer,0,&its,NULL) == -1) {
+					err = errno;
+					free(kv->key);
+					free(kv);
+					timer_delete(kv->timer);
+					duk_push_sprintf(duk,"failed to set timer: %s",strerror(err));
+					duk_throw(duk);
+				} 
+			} else {
+				kv->timer = NULL;
+			}
+			kv->ffn = free;
+			pthread_rwlock_wrlock(&kvs_lock);
+			HASH_ADD_KEYPTR(hh,kvs,kv->key,len,kv);
+			pthread_rwlock_unlock(&kvs_lock);
+			duk_push_true(duk);
+		}
+	} else {
+		if (value == NULL) {
+			pthread_rwlock_wrlock(&kvs_lock);
+			HASH_DEL(kvs,kv);
+			pthread_rwlock_unlock(&kvs_lock);
+			if (kv->timer != NULL) timer_delete(kv->timer);
+			free(kv->key);
+			free(kv);
+			duk_push_true(duk);
+		} else {
+			if (nxflag) {
+				duk_push_false(duk);
+			} else {
+				kv->value = (char *)value;
+				if (expiry < 0) {
+					timer_delete(kv->timer);
+					kv->timer = NULL;
+				} else if (expiry > 0) {
+					its.it_value.tv_sec = expiry;
+					its.it_value.tv_nsec = 0;
+					its.it_interval.tv_sec = 0;
+					its.it_interval.tv_nsec = 0;
+					if (timer_settime(kv->timer,0,&its,NULL) == -1) {
+						err = errno;
+						duk_push_sprintf(duk,"failed to set timer: %s",strerror(err));
+						duk_throw(duk);
+					}
+				}
+				duk_push_true(duk);
+			}
+		}
+	}
+	return 1;
+}

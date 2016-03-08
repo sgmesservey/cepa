@@ -1,7 +1,7 @@
 CC=gcc
 INCLS=-Idependencies/uthash -Idependencies/sds -Idependencies/duktape -Idependencies/ezxml -Idependencies/sqlite-amalgamation-3110000
 CFLAGS=-Wall $(INCLS) -O2 -fomit-frame-pointer -mtune=native
-LDLIBS=-lm -lgnutls -lduk -ldl -lonion -lpthread
+LDLIBS=-lm -lgnutls -lduk -ldl -lonion -lrt -lpthread
 SQLFTS=-DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS
 
 cepa: main.c sds.o duktape.o ezxml.o sqlite3.o
