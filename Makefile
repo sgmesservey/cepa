@@ -29,3 +29,9 @@ example: example/cepa/dependencies/baz.c
 run: cepa
 	./cepa example.xml
 
+.PHONY: clean
+clean:
+	rm -f cepa
+	rm -f *.o
+	$(MAKE) -C dependencies/duklib clean
+

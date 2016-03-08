@@ -8,3 +8,7 @@ all: File.so
 File.so: File.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
 
+.PHONY: clean
+clean:
+	rm -f *.so
+
