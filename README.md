@@ -39,23 +39,23 @@ The remaining targets are:<br>
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <server>
-	<docroot>/usr/local/src/cepa/example/cepa/docroot</docroot>
-	<port>8080</port>
-	<!-- SSL configuration (optional)
-	<ssl>
-		<port>8443</port>
-		<cert>cert.pem</cert>
-		<key>key.pem</key>
-		<cacerts>ca.pem</cacerts>
-	</ssl>
-	-->
-	<scripts path="/usr/local/src/cepa/example/cepa/scripts" global="jsx" libpath="/usr/local/src/cepa/example/cepa/lib">
-		<script url="^foo" name="foo.jsx"/>
-		<script url="^bar" name="bar.jsx"/>
-	</scripts>
-	<modules path="/usr/local/src/cepa/example/cepa/modules">
-		<module url="^baz" name="baz.so"/>
-	</modules>
+  <docroot>/usr/local/src/cepa/example/cepa/docroot</docroot>
+  <port>8080</port>
+  <!-- SSL configuration (optional)
+  <ssl>
+    <port>8443</port>
+    <cert>cert.pem</cert>
+    <key>key.pem</key>
+    <cacerts>ca.pem</cacerts>
+  </ssl>
+  -->
+  <scripts path="/usr/local/src/cepa/example/cepa/scripts" global="jsx" libpath="/usr/local/src/cepa/example/cepa/lib">
+    <script url="^foo" name="foo.jsx"/>
+    <script url="^bar" name="bar.jsx"/>
+  </scripts>
+  <modules path="/usr/local/src/cepa/example/cepa/modules">
+    <module url="^baz" name="baz.so"/>
+  </modules>
 </server>
 ```
 
@@ -86,9 +86,11 @@ If **cacerts** is present, it is the path to the PEM formatted file containing t
 ## Scripts
 **Cepa** uses [Duktape](http://duktape.org/) to provide its server-side javascript engine.<br>
 Bindings have been provided to wrap much of the request and response processing power of Onion.<br>
-A global object, named `cgi` for historical reasons, provides the wrapper.<br>
-The methods are enumerated below.
-```Javascript
+Bindings are also provided for SQLite version 3, and an in-memory key/value store.<br>
+Errors or faults in the underlying library are thrown as execeptions.<br>
+
+**Request & Output bindings**
+```javascript
 // output. does not emit spaces or newlines, even between arguments. returns undefined.
 cgi.print(a,b,...);
 
@@ -122,6 +124,9 @@ cgi.getQuery(key);
 // returns the value of the POST variable named by key, or undefined if it does not exist.
 cgi.getPost(key);
 
+// return the value of the cookie named by key, or undefined if it does not exist
+cgi.getCookie(key);
+
 /*
  * call fn for every value of key that exists in the POST variable named by key
  * useful for POSTed form elements, for example checkboxes
@@ -130,10 +135,93 @@ cgi.getPostMulti(key,fn);
 
 /*
  * get the name of the actual uploaded file parsed by onion for the POST variable named by key, or undefined.
- * use cgi.getPost(...) to get the name of the file uploaded as provided by the user agent.
+ * use cgi.getPost(key) to get the name of the file uploaded as provided by the user agent.
  */
 cgi.getFile(key);
 ```
+
+**Sqlite3 Bindings**
+```javascript
+/*
+ * open and return a database handle to the SQLite file at path.
+ * timeout, if specified and a positive integer, sets the database timeout.
+ * create_flag, iff the boolean truth value, creates the database.
+ * if you need to set create_flag, but don't want to set a timeout, set timeout to 0
+ */
+var db = sqlite(path[,timeout][,create_flag);
+
+/*
+ * the returned object is decorated with the following methods
+ */
+
+/*
+ * close this database handle.
+ * this method is called automatically when the object is garbage collected,
+ * as a convenience
+ */
+db.close();
+
+/*
+ * execute the query_string query against the database.
+ * iff column_names is the boolean truth value, the first array of the result contains
+ * the column names.
+ * returns an array of arrays reperesenting the columns and rows.
+ * column value types are coerced into their javascript equivalents;
+ * note that blobs become Duktape [buffers](http://duktape.org/guide.html#bufferobjects)
+ */
+db.query(query_string[,column_names]);
+
+/*
+ * prepare and return a SQLite prepared statement
+ * the statement handle object is decorated with the functions listed directly below
+ */
+var stmt = db.prepare(statement_string);
+
+/*
+ * bind a parameter to the statement.
+ * the index follows SQLite conventions, i.e. the leftmost parameter is index 1
+ * the value is autmatically coerced into a SQLite value type
+ * returns true on success
+ */
+stmt.bind(index,value);
+
+/*
+ * execute the statement
+ * iff column_names is the boolean truth value, the first array contains the column names
+ * returns an array of arrays, the same as *db.query()*
+ */
+stmt.execute([column_names]);
+
+/*
+ * finalize this statement object.
+ * this method is also called automatically when the object is garbage collected,
+ * as a convenience
+ */
+stmt.finalize();
+```
+
+**Key/Value Store**<br>
+Simple string key/value store.
+The store is **not** persisted on server shutdown or restart.
+```javascript
+/*
+ * sets or deletes the value of key
+ * deletes when value is null or undefined
+ * expiry, if negative, deletes the timer associated with key
+ * if expiry is zero, the timer is either not set or unchanged
+ * if expiry is positive, the timer is set or updated equal to expiry seconds
+ * nx_flag, iff is the boolean truth value, will not set key to value if key already exists
+ * returns true if the value was set, deleted, or updated,
+ * and false when nx_flag was specified but key already exists
+ */
+kv.set(key[,value][,expiry][,nx_flag]);
+
+/*
+ * return the value of *key*, or undefined if *key* was not found.
+ */
+kv.get(key);
+```
+
 
 If configured, **Cepa** can also load scripts and native code libraries from a separate directory outside of the document root.<br>
 This facility is provided by the global function `require`.<br>
@@ -141,14 +229,12 @@ A native code library needs to export a single function with the following signa
 ```C
 duk_int_t init(duk_context *duk);
 ```
-The function is called with two arguments: *exports* and *module*, in that order.<br>
-You can either decorate *exports* with functions and properties,<br>
-or set the *exports* property of *module* to directly return a function.
+The function is called with two arguments on the stack: *exports* and *module*, in that order.<br>
+You can either decorate *exports* with functions and properties, or set the *exports* property of *module* to directly return a function.
 
 
 ## Modules
-The server can load custom handlers that you write using the Onion API,<br>
-and map them to URLs you specify.<br>
+The server can load custom handlers that you write using the Onion API, and map them to URLs you specify.<br>
 The modules should be compiled as shared library files (.so), and placed in whatever directory you specified in the XML file.<br>
 The modules must export the following functions:
 ```C
@@ -169,5 +255,5 @@ onion_connection_status handle(void *data, onion_request *req, onion_response *r
 - Integrate a couple of other SSL-related functions from Onion (DER, PKCS12, CRLs)
 - ~~Bind SQLite3 right into the main binary, instead of loading it as a library~~
 - Script caching (including offline) and dynamic recompilation
-- In-memory key/value store
+- ~~In-memory key/value store~~
 
