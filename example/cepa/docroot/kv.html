@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="UTF-8">
+	<title>Key/Value Store Test</title>
+	<script src="js/kix.min.js"></script>
+	<script>
+		function ajax_callback(r) {
+			if (!r) return alert("ajax error");
+			if (r.charAt(0) == "!") return alert(r.substring(1));
+			$("#result").text(r);
+		}
+		function do_blank() {
+			$("#value").value("");
+		}
+		function do_get() {
+			var field = $("#key_get"), key = field.value();
+			if (key.length == 0) return alert("Key field blank");
+			$.ajax("GET","kv.jsx",ajax_callback,{ "op":"GET", "key":key });
+			field.value("");
+		}
+		function do_set() {
+			var value,expiry,nx,data = {};
+			data.op = "SET";
+			data.key = $("#key_set").value();
+			if (data.key.length == 0) return alert("Key field blank");
+			value = $("#value").value();
+			if (value.length) data.value = value;
+			expiry = $("#expiry").value();
+			if (expiry.length == 0) expiry = "0";
+			if (parseInt(expiry) === NaN) return alert("Expiry field must be a number or blank (for 0)");
+			data.expiry = expiry;
+			data.nx = $("#nx")[0].checked;
+			$.ajax("GET","kv.jsx",ajax_callback,data);
+			$("#key_set").value("");
+			$("#value").value("");
+			$("#expiry").value("");
+			$("#nx").removeAttr("checked");
+		}
+		function init() {
+			$("#set").on("click",do_set);
+			$("#get").on("click",do_get);
+			$("#blank").on("click",do_blank);
+		}
+		$(init);
+	</script>
+</head>
+<body>
+	<h1>Key/Value Store Tests</h1>
+	<p>Fill out the form below, and click 'execute' to execute your action.</p>
+	<div>
+		<table>
+			<caption>Set</caption>
+			<tr><td>Key:</td><td><input id="key_set" type="text" size="20"></td><td>&nbsp;</td></tr>
+			<tr><td>Value:</td><td><input id="value" type="text" size="20"></td><td><input id="blank" type="button" value="clear"></td></tr>
+			<tr><td>Expiry:</td><td><input id="expiry" type="text" size="4" maxlength="4"></td><td><input id="nx" type="checkbox" value="nx">Not Exists</td></tr>
+			<tr><td><input id="set" type="button" value="SET"></td<td>&nbsp;</td><td>&nbsp;</td></tr>
+		</table>
+	</div>
+	<div>
+		<table>
+			<caption>Get</caption>
+			<tr><td>Key:</td><td><input id="key_get" type="text" size="20"></td><td><input id="get" type="button" value="GET"></td></tr>
+		</table>
+	</div>
+	<h2>Result:</h2>
+	<div style="border:1px solid black; width:300px; height:200px;" id="result"></div>
+</body>
+</html>

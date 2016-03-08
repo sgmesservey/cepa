@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<server>
+	<docroot>/usr/local/src/cepa/example/cepa/docroot</docroot>
+	<port>8080</port>
+	<!-- SSL configuration (optional)
+	<ssl>
+		<port>8443</port>
+		<cert>cert.pem</cert>
+		<key>key.pem</key>
+	</ssl>
+	-->
+	<scripts path="/usr/local/src/cepa/example/cepa/scripts" global="jsx" libpath="/usr/local/src/cepa/example/cepa/lib">
+		<script url="^foo" name="foo.jsx"/>
+		<script url="^bar" name="bar.jsx"/>
+	</scripts>
+	<modules path="/usr/local/src/cepa/example/cepa/modules">
+		<module url="^baz" name="baz.so"/>
+	</modules>
+</server>
+
