@@ -60,10 +60,18 @@ typedef struct {
 	UT_hash_handle hh;
 } keyvalue;
 
+typedef struct {
+	int (*kv_set)(const char *key,void *value,void *ffn,int expiry,int nx);
+	const char *(*kv_get)(const char *key);
+} module_context;
+
 static int DONE = 0;
 static char *JSLIBPATH = NULL;
 static keyvalue *kvs = NULL;
 static pthread_rwlock_t kvs_lock;
+
+static int kv_set(const char *key,void *value,void *ffn,int expiry,int nx);
+static const char *kv_get(const char *key);
 
 static onion_connection_status index_handler(void *data, onion_request *request, onion_response *response);
 static onion_connection_status js_handler(void *data, onion_request *request, onion_response *response);
@@ -159,7 +167,7 @@ static void timer_handler(int sig, siginfo_t *si, void *uc) {
 
 int main(int argc, char **argv) {
 	onion *o;
-	onion_handler *root,*files = NULL;
+	onion_handler *root,*files = NULL,*module_handler;
 	onion_url *urls;
 	onion_listen_point *ssl = NULL;
 	ezxml_t xml,sub,node;
@@ -168,6 +176,7 @@ int main(int argc, char **argv) {
 	sds data,docroot = NULL,global_regex;
 	void *handle;
 	int (*init)(const char *path);
+	module_context mctx;
 	onion_connection_status (*dynhandler)(void *,onion_request *,onion_response *);
 	listelm *modules = NULL,*elm;
 	struct sigaction sa;
@@ -214,6 +223,9 @@ int main(int argc, char **argv) {
 #ifdef CEPA_USE_INDEX_HTML
 	onion_url_add(urls,"",index_handler);
 #endif
+
+	mctx.kv_set = kv_set;
+	mctx.kv_get = kv_get;
 
 	xml = ezxml_parse_file(argv[1]);
 	if (xml->name == NULL) {
@@ -303,7 +315,9 @@ int main(int argc, char **argv) {
 					}
 					elm->handle = handle;
 					LL_APPEND(modules,elm);
-					onion_url_add(urls,url,dynhandler);
+					module_handler = onion_handler_new(dynhandler,&mctx,NULL);
+					onion_url_add_handler(urls,url,module_handler);
+					//onion_url_add(urls,url,dynhandler);
 				}
 			}
 		}
@@ -1138,6 +1152,7 @@ static duk_int_t duk_kv_set(duk_context *duk) {
 	struct sigevent sev;
 	struct itimerspec its;
 	int err;
+	char *temp;
 
 	key = duk_require_lstring(duk,0,&len);
 	value = duk_get_string(duk,1);
@@ -1212,7 +1227,14 @@ static duk_int_t duk_kv_set(duk_context *duk) {
 			if (nxflag) {
 				duk_push_false(duk);
 			} else {
-				kv->value = (char *)value;
+				if ((temp = strdup(value)) == NULL) {
+					duk_push_string(duk,"out of memory");
+					duk_throw(duk);
+				}
+				pthread_rwlock_wrlock(&kvs_lock);
+				free(kv->value);
+				kv->value = temp;
+				pthread_rwlock_unlock(&kvs_lock);
 				if (expiry < 0) {
 					timer_delete(kv->timer);
 					kv->timer = NULL;
@@ -1231,5 +1253,93 @@ static duk_int_t duk_kv_set(duk_context *duk) {
 			}
 		}
 	}
+	return 1;
+}
+
+static const char *kv_get(const char *key) {
+	keyvalue *kv;
+
+	if (key == NULL) return NULL;
+	pthread_rwlock_rdlock(&kvs_lock);
+	HASH_FIND(hh,kvs,key,strlen(key),kv);
+	pthread_rwlock_unlock(&kvs_lock);
+	if (kv == NULL) return NULL;
+	return (const char *)kv->value;
+}
+
+static int kv_set(const char *key, void *value, void *ffn, int expiry, int nx) {
+	keyvalue *kv;
+	struct sigevent sev;
+	struct itimerspec its;
+
+	if (key == NULL) return 0;
+	pthread_rwlock_rdlock(&kvs_lock);
+	HASH_FIND(hh,kvs,key,strlen(key),kv);
+	pthread_rwlock_unlock(&kvs_lock);
+
+	if (kv == NULL) {
+		if (value == NULL) return 0;
+		if ((kv = malloc(sizeof(keyvalue))) == NULL) return 0;
+		if ((kv->key = strdup(key)) == NULL) {
+			free(kv);
+			return 0;
+		}
+		kv->value = value;
+		if (expiry > 0) {
+			sev.sigev_notify = SIGEV_SIGNAL;
+			sev.sigev_signo = SIGRTMAX - 1;
+			sev.sigev_value.sival_ptr = kv->key;
+			if (timer_create(CLOCK_REALTIME,&sev,&kv->timer) == -1) {
+				free(kv->value);
+				free(kv->key);
+				free(kv);
+				return 0;
+			}
+			its.it_value.tv_sec = expiry;
+			its.it_value.tv_nsec = 0;
+			its.it_interval.tv_sec = 0;
+			its.it_interval.tv_nsec = 0;
+			if (timer_settime(kv->timer,0,&its,NULL) == -1) {
+				timer_delete(kv->timer);
+				free(kv->value);
+				free(kv->key);
+				free(kv);
+				return 0;
+			}
+		} else {
+			kv->timer = NULL;
+		}
+		kv->ffn = ffn;
+		pthread_rwlock_wrlock(&kvs_lock);
+		HASH_ADD_KEYPTR(hh,kvs,kv->key,strlen(kv->key),kv);
+		pthread_rwlock_unlock(&kvs_lock);
+		return 1;
+	}
+	if (value == NULL) {
+		pthread_rwlock_wrlock(&kvs_lock);
+		HASH_DEL(kvs,kv);
+		pthread_rwlock_unlock(&kvs_lock);
+		timer_delete(kv->timer);
+		if (kv->ffn != NULL) kv->ffn(kv->value);
+		free(kv->key);
+		free(kv);
+		return 1;
+	}
+	if (nx > 0) return 0;
+	if (expiry < 0) {
+		timer_delete(kv->timer);
+		kv->timer = NULL;
+	} else if (expiry > 0) {
+		its.it_value.tv_sec = expiry;
+		its.it_value.tv_nsec = 0;
+		its.it_interval.tv_sec = 0;
+		its.it_interval.tv_nsec = 0;
+		if (timer_settime(kv->timer,0,&its,NULL) == -1) return 0;
+	}
+	pthread_rwlock_wrlock(&kvs_lock);
+	if (kv->ffn != NULL) kv->ffn(kv->value);
+	kv->value = value;
+	kv->ffn = ffn;
+	pthread_rwlock_unlock(&kvs_lock);
 	return 1;
 }

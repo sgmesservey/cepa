@@ -1,5 +1,6 @@
 require("Sqlite3.so");
 cgi.setHeader("Content-Type","text/html;charset=UTF-8");
+cgi.setHeader("Cache-Control:private, max-age=0, no-cache");
 var db = Sqlite("../data/foo.db");
 var table = db.query("SELECT * FROM data");
 db.close();

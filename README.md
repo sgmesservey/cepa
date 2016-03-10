@@ -248,6 +248,38 @@ int init(const char *path);
  * This is the function that actually handles the request.
  */
 onion_connection_status handle(void *data, onion_request *req, onion_response *res);
+
+/*
+ * the parameter 'data' above is a pointer to the folloing structure:
+ */
+typedef struct {
+	int (*kv_set)(const char *key, void *value, void *ffn, int expiry, int nx);
+	const char * (*kv_get)(const char *key);
+} module_context;
+
+/*
+ * These function pointers allow loaded modules to access the key/value store,
+ * though without the nice exceptions that javascript provides
+ */
+
+/*
+ * This function will create, update, or delete a value from the store.
+ * If expiry is negative, the timer associated with a key will be deleted.
+ * If expiry is zero, a timer is either unchanged or not created.
+ * If nx is positive, an attempt to create or update a key that already exists will fail.
+ * If value is NULL, key is removed from the store.
+ * ffn is a function pointer to be called with 'value' as a parameter when a value is modified or deleted.
+ * ffn may NULL for static or otherwise separately managed values.
+ * ffn is usually 'free' for a block of data returned by malloc or strdup.
+ * Upon a successful create, update, or delete, 1 is returned.
+ * If an operation fails, or if nx was specified and the key already exists, 0 is returned.
+ */
+data.kv_set(const char *key, void *data, void *ffn, int expiry, int nx);
+
+/*
+ * This function returns the value associated with key, or NULL if the key is not in the store.
+ */
+data.kv_get(const char *key);
 ```
 
 
