@@ -1,6 +1,6 @@
 var op,key,value,expiry,nx;
 cgi.setHeader("Content-Type","text/plain;charset=UTF-8");
-cgi.setHeader("Cache-Control:private, max-age=0, no-cache");
+cgi.setHeader("Cache-Control","private, max-age=0, no-cache");
 op = cgi.getQuery("op") || false;
 key = cgi.getQuery("key");
 
