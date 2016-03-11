@@ -343,7 +343,7 @@ int main(int argc, char **argv) {
 	if (files != NULL) onion_handler_add(root,files);
 	onion_set_root_handler(o,root);
 
-	//daemon(1,0);
+	daemon(1,0);
 
 	onion_listen(o);
 
