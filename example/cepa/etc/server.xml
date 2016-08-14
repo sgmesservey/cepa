@@ -7,6 +7,7 @@
 		<port>8443</port>
 		<cert>cert.pem</cert>
 		<key>key.pem</key>
+		<cacerts>ca.pem</cacerts>
 	</ssl>
 	-->
 	<scripts path="/usr/local/src/cepa/example/cepa/scripts" global="jsx" libpath="/usr/local/src/cepa/example/cepa/lib">

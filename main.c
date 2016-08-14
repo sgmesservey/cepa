@@ -26,10 +26,20 @@
 #define CEPA_PATH_MAX       128
 #define CEPA_USE_INDEX_HTML 1
 
-typedef struct listelm {
+typedef struct module {
+	char *name;
+	char *url;
+	onion_handler *handler;
 	void *handle;
-	struct listelm *next;
-} listelm;
+	void (*destroy)(void);
+	struct module *next;
+} module;
+
+typedef struct script {
+	char *name;
+	char *url;
+	struct script *next;
+} script;
 
 typedef struct {
 	char *key;
@@ -53,6 +63,14 @@ typedef struct {
 } context;
 
 typedef struct {
+	char *path;
+	void *bytecode;
+	duk_size_t len;
+	time_t modified;
+	UT_hash_handle hh;
+} bytecode;
+
+typedef struct {
 	char *key;
 	void *value;
 	timer_t timer;
@@ -61,6 +79,15 @@ typedef struct {
 } keyvalue;
 
 typedef struct {
+	onion *server;
+	char *port;
+	char *sslport;
+	char *global_ext;
+	script *scripts;
+	char *scripts_path;
+	char *jslib_path;
+	module *modules;
+	char *modules_path;
 	int (*kv_set)(const char *key,void *value,void *ffn,int expiry,int nx);
 	const char *(*kv_get)(const char *key);
 } module_context;
@@ -68,7 +95,9 @@ typedef struct {
 static int DONE = 0;
 static char *JSLIBPATH = NULL;
 static keyvalue *kvs = NULL;
+static bytecode *cached_scripts = NULL;
 static pthread_rwlock_t kvs_lock;
+static pthread_rwlock_t scripts_lock;
 
 static int kv_set(const char *key,void *value,void *ffn,int expiry,int nx);
 static const char *kv_get(const char *key);
@@ -136,13 +165,14 @@ static void sig_handler(int sig) {
 	DONE = 1;
 }
 
-static void close_modules(listelm *list) {
-	listelm *e,*et;
+static void close_modules(module *list) {
+	module *m,*mt;
 
-	LL_FOREACH_SAFE(list,e,et) {
-		LL_DELETE(list,e);
-		dlclose(e->handle);
-		free(e);
+	LL_FOREACH_SAFE(list,m,mt) {
+		LL_DELETE(list,m);
+		if (m->destroy != NULL) m->destroy();
+		dlclose(m->handle);
+		free(m);
 	}
 }
 
@@ -178,10 +208,12 @@ int main(int argc, char **argv) {
 	int (*init)(const char *path);
 	module_context mctx;
 	onion_connection_status (*dynhandler)(void *,onion_request *,onion_response *);
-	listelm *modules = NULL,*elm;
+	module *modules = NULL,*mod;
+	script *scripts = NULL,*scr;
 	struct sigaction sa;
 	keyvalue *kv,*kvt;
-
+	bytecode *bc,*bct;
+	
 	if (argc == 1) {
 		fprintf(stderr,"%s config_file\n",argv[0]);
 		return 1;
@@ -210,7 +242,12 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	if ((o = onion_new(O_THREADED | O_DETACH_LISTEN | O_NO_SIGTERM)) == NULL) {
+	if (pthread_rwlock_init(&scripts_lock,NULL) < 0) {
+		fprintf(stderr,"failed to initialze script cache lock\n");
+		return 1;
+	}
+
+	if ((o = onion_new(O_POOL | O_DETACH_LISTEN | O_NO_SIGTERM)) == NULL) {
 		fprintf(stderr,"failed to initialize onion\n");
 		return 1;
 	}
@@ -220,10 +257,18 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-#ifdef CEPA_USE_INDEX_HTML
+#ifdef CEPA_USE_INDEX_HANDLER
 	onion_url_add(urls,"",index_handler);
 #endif
 
+	mctx.server = o;
+	mctx.sslport = NULL;
+	mctx.global_ext = NULL;
+	mctx.scripts = NULL;
+	mctx.scripts_path = NULL;
+	mctx.modules = NULL;
+	mctx.modules_path = NULL;
+	mctx.jslib_path = NULL;
 	mctx.kv_set = kv_set;
 	mctx.kv_get = kv_get;
 
@@ -251,16 +296,23 @@ int main(int argc, char **argv) {
 
 	if ((node = ezxml_child(xml,"port")) != NULL) {
 		onion_set_port(o,node->txt);
+		mctx.port = strdup(node->txt); // TODO null check
 	} else {
 		onion_set_port(o,CEPA_DEFAULT_PORT);
+		mctx.port = strdup(CEPA_DEFAULT_PORT); // TODO null check
 	}
 
 	if ((sub = ezxml_child(xml,"scripts")) != NULL) {
 		if ((script_path = ezxml_attr(sub,"path")) != NULL) {
+			mctx.scripts_path = strdup(script_path); // TODO null check
 			for (node = ezxml_child(sub,"script"); node != NULL; node = node->next) {
 				url = ezxml_attr(node,"url");
 				name = ezxml_attr(node,"name");
 				if (url != NULL && name != NULL) {
+					scr = malloc(sizeof(script)); // TODO null check
+					scr->name = strdup(name); // TODO null check
+					scr->url = strdup(url); // TODO null check
+					LL_APPEND(scripts,scr);
 					data = sdsempty();
 					data = sdscatprintf(data,"!%s/%s",script_path,name);
 					onion_url_add_with_data(urls,url,js_handler,data,sdsfree);
@@ -272,18 +324,21 @@ int main(int argc, char **argv) {
 				fprintf(stderr,"global js handler: missing <docroot> element\n");
 				return 1;
 			}
+			if (strlen(global_script_ext) == 0) global_script_ext = "jsx";
 			global_regex = sdsempty();
 			global_regex = sdscatprintf(global_regex,"^(.*)\\.%s$",global_script_ext);
 			onion_url_add_with_data(urls,global_regex,js_handler,docroot,sdsfree);
+			mctx.global_ext = strdup(global_script_ext); // TODO null check
 			sdsfree(global_regex);
 		}
 		if ((libpath = ezxml_attr(sub,"libpath")) != NULL) {
-			JSLIBPATH = strdup(libpath);
+			JSLIBPATH = strdup(libpath); // TODO null check
 		}
 	}
 
 	if ((sub = ezxml_child(xml,"modules")) != NULL) {
 		if ((modpath = ezxml_attr(sub,"path")) != NULL) {
+			mctx.modules_path = strdup(modpath); // TODO null check
 			for (node = ezxml_child(sub,"module"); node != NULL; node = node->next) {
 				url = ezxml_attr(node,"url");
 				name = ezxml_attr(node,"name");
@@ -308,23 +363,29 @@ int main(int argc, char **argv) {
 						return 1;
 					}
 					init(docroot);
-					if ((elm = malloc(sizeof(listelm))) == NULL) {
+					if ((mod = malloc(sizeof(module))) == NULL) {
 						fprintf(stderr,"out of memory\n");
 						close_modules(modules);
 						return 1;
 					}
-					elm->handle = handle;
-					LL_APPEND(modules,elm);
 					module_handler = onion_handler_new(dynhandler,&mctx,NULL);
 					onion_url_add_handler(urls,url,module_handler);
-					//onion_url_add(urls,url,dynhandler);
+					mod->name = strdup(name); // TODO null check
+					mod->url = strdup(url); // TODO null check
+					mod->handler = module_handler;
+					mod->handle = handle;
+					mod->destroy = dlsym(handle,"destroy"); // not an error if NULL
+					LL_APPEND(modules,mod);
 				}
 			}
 		}
 	}
 
 	if ((sub = ezxml_child(xml,"ssl")) != NULL) {
-		if ((node = ezxml_child(sub,"port")) != NULL) sslport = node->txt;
+		if ((node = ezxml_child(sub,"port")) != NULL) {
+			sslport = node->txt;
+			mctx.sslport = strdup(sslport); // TODO null check
+		}
 		if ((node = ezxml_child(sub,"cert")) != NULL) sslcert = node->txt;
 		if ((node = ezxml_child(sub,"key")) != NULL) sslkey = node->txt;
 		if (sslport != NULL && sslcert != NULL && sslkey != NULL) {
@@ -361,7 +422,17 @@ int main(int argc, char **argv) {
 		if (kv->ffn != NULL) kv->ffn(kv->value);
 		free(kv);
 	}
+	HASH_ITER(hh,cached_scripts,bc,bct) {
+		HASH_DEL(cached_scripts,bc);
+		free(bc->bytecode);
+		free(bc);
+	}
 	pthread_rwlock_destroy(&kvs_lock);
+	pthread_rwlock_destroy(&scripts_lock);
+	free(mctx.port);
+	free(mctx.sslport);
+	free(mctx.modules_path);
+	free(mctx.global_ext);
 	return 0;
 }
 
@@ -373,12 +444,15 @@ static onion_connection_status index_handler(void *data, onion_request *request,
 static onion_connection_status js_handler(void *data, onion_request *request, onion_response *response) {
 	const char *spath = data,*msg;
 	char path[CEPA_PATH_MAX];
+	struct stat astat;
 	context ctx;
 	duk_context *duk = NULL;
 	header *h,*ht;
-	int len;
+	int len,insert = 0,compiled = 0;
 	jslib *j,*jt;
 	sds errfull = NULL;
+	bytecode *bc;
+	void *code;
 
 	if (*spath == '!') {
 		snprintf(path,CEPA_PATH_MAX - 1,"%s",&spath[1]);
@@ -396,6 +470,56 @@ static onion_connection_status js_handler(void *data, onion_request *request, on
 	if ((duk = duk_create_heap_default()) == NULL) {
 		msg = "out of memory";
 		goto FAIL;
+	}
+
+	if (stat(path,&astat) == -1) {
+		len = errno;
+		errfull = sdsempty();
+		errfull = sdscatprintf(errfull,"failed to load %s: %s",path,strerror(len));
+		msg = errfull;
+		goto FAIL;
+	}
+
+	pthread_rwlock_rdlock(&scripts_lock);
+	HASH_FIND(hh,cached_scripts,path,strlen(path),bc);
+	pthread_rwlock_unlock(&scripts_lock);
+
+	if (bc == NULL) {
+		if ((bc = malloc(sizeof(bytecode))) == NULL) {
+			msg = "out of memory";
+			goto FAIL;
+		}
+		if ((bc->path = strdup(path)) == NULL) {
+			free(bc);
+			msg = "out of memory";
+			goto FAIL;
+		}
+		bc->modified = 0;
+		bc->bytecode = NULL;
+		insert = 1;
+	}
+	if (bc->modified < astat.st_mtime) {
+		if (duk_pcompile_file(duk,0,path) != 0) {
+			msg = duk_get_string(duk,-1);
+			goto FAIL;
+		}
+		duk_dump_function(duk);
+		code = duk_get_buffer_data(duk,-1,(duk_size_t *)&bc->len);
+		pthread_rwlock_wrlock(&scripts_lock);
+		if (bc->bytecode != NULL) free(bc->bytecode);
+		if ((bc->bytecode = malloc(bc->len)) == NULL) {
+			free(bc->path);
+			free(bc);
+			pthread_rwlock_unlock(&scripts_lock);
+			msg = "out of memory";
+			goto FAIL;
+		}
+		memcpy(bc->bytecode,code,bc->len);
+		bc->modified = astat.st_mtime;
+		if (insert) HASH_ADD_KEYPTR(hh,cached_scripts,bc->path,strlen(bc->path),bc);
+		pthread_rwlock_unlock(&scripts_lock);
+		duk_pop(duk);
+		compiled = 1;
 	}
 
 	duk_push_heap_stash(duk);
@@ -423,7 +547,33 @@ static onion_connection_status js_handler(void *data, onion_request *request, on
 	duk_pop_2(duk);
 
 
+	/*
 	if (duk_peval_file(duk,path) != 0) {
+		errfull = sdsempty();
+		if (duk_is_object(duk,-1)) {
+			duk_get_prop_string(duk,-1,"fileName");
+			errfull = sdscat(errfull,duk_safe_to_string(duk,-1));
+			duk_pop(duk);
+			errfull = sdscat(errfull," : ");
+			duk_get_prop_string(duk,-1,"lineNumber");
+			errfull = sdscat(errfull,duk_safe_to_string(duk,-1));
+			duk_pop(duk);
+			errfull = sdscat(errfull," : ");
+			duk_get_prop_string(duk,-1,"message");
+			errfull = sdscat(errfull,duk_safe_to_string(duk,-1));
+			duk_pop(duk);
+			msg = errfull;
+		} else {
+			msg = duk_safe_to_string(duk,-1);
+		}
+		goto FAIL;
+	}
+	*/
+
+	code = duk_push_buffer(duk,bc->len,0);
+	memcpy(code,bc->bytecode,bc->len);
+	duk_load_function(duk);
+	if (duk_pcall(duk,0) != 0) {
 		errfull = sdsempty();
 		if (duk_is_object(duk,-1)) {
 			duk_get_prop_string(duk,-1,"fileName");
@@ -453,6 +603,7 @@ static onion_connection_status js_handler(void *data, onion_request *request, on
 		free(h->value);
 		free(h);
 	}
+	if (compiled) onion_response_set_header(response,"Compiled","true");
 	len = sdslen(ctx.buffer);
 	onion_response_set_length(response,len);
 	if (len) onion_response_write(response,ctx.buffer,len);
@@ -479,7 +630,8 @@ FAIL:
 		free(j);
 	}
 	sdsfree(ctx.buffer);
-	onion_shortcut_response(msg,500,request,response);
+	if (msg) onion_shortcut_response(msg,500,request,response);
+	else onion_shortcut_response("unknown error",500,request,response);
 	if (duk != NULL) duk_destroy_heap(duk);
 	if (errfull != NULL) sdsfree(errfull);
 	return OCS_PROCESSED;
@@ -843,12 +995,12 @@ static duk_int_t duk_get_cookie(duk_context *duk) {
 static duk_int_t duk_sqlite_factory(duk_context *duk) {
 	const char *path;
 	sqlite3 *db;
-	int flags = SQLITE_OPEN_READWRITE,timeout = 50;
+	int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,timeout = 50;
 	
 	path = duk_require_string(duk,0);
 	if (*path == '\0') return DUK_RET_API_ERROR;
 	if (duk_get_top(duk) > 1) timeout = duk_require_int(duk,1);
-	if (duk_get_top(duk) > 2) if (duk_get_boolean(duk,2)) flags &= SQLITE_OPEN_CREATE;
+	if (duk_get_top(duk) > 2) if (duk_get_boolean(duk,2)) flags |= SQLITE_OPEN_CREATE;
 
 	if (sqlite3_open_v2(path,&db,flags,NULL) != SQLITE_OK) {
 		duk_push_string(duk,sqlite3_errmsg(db));
